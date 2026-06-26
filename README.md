@@ -34,7 +34,7 @@ GitHub Actions workflow
 SSH + rsync to GCP Compute Engine VM
         |
         v
-Docker Compose rebuild/restart
+Docker Compose
         |
         v
 Flask app + MySQL container
