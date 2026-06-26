@@ -15,10 +15,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure SSH
+        shell: bash
+        env:
+          GCP_SSH_PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.GCP_SSH_PRIVATE_KEY }}" > ~/.ssh/gcp_vm
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          key = os.environ["GCP_SSH_PRIVATE_KEY"]
+          key = key.replace("\\r\\n", "\n").replace("\\n", "\n")
+          key = key.replace("\r\n", "\n").replace("\r", "\n").strip()
+          Path.home().joinpath(".ssh", "gcp_vm").write_text(key + "\n", encoding="utf-8", newline="\n")
+          PY
           chmod 600 ~/.ssh/gcp_vm
+          ssh-keygen -y -f ~/.ssh/gcp_vm > /dev/null
           ssh-keyscan -H "${{ secrets.GCP_VM_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Sync files to VM
@@ -34,15 +46,15 @@ jobs:
             ./ "${{ secrets.GCP_VM_USER }}@${{ secrets.GCP_VM_HOST }}:/opt/app_python_mysql/"
 
       - name: Write production environment file
+        shell: bash
         run: |
-          ssh -i ~/.ssh/gcp_vm "${{ secrets.GCP_VM_USER }}@${{ secrets.GCP_VM_HOST }}" 'cat > /opt/app_python_mysql/.env <<EOF
+          ssh -i ~/.ssh/gcp_vm "${{ secrets.GCP_VM_USER }}@${{ secrets.GCP_VM_HOST }}" "cat > /opt/app_python_mysql/.env && chmod 600 /opt/app_python_mysql/.env" <<EOF
           FLASK_SECRET_KEY=${{ secrets.FLASK_SECRET_KEY }}
           MYSQL_DATABASE=${{ secrets.MYSQL_DATABASE }}
           MYSQL_USER=${{ secrets.MYSQL_USER }}
           MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }}
           MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
           EOF
-          chmod 600 /opt/app_python_mysql/.env'
 
       - name: Rebuild and restart containers
         run: |
