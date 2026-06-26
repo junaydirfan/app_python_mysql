@@ -1,124 +1,227 @@
+﻿import os
+import time
+from contextlib import contextmanager
+
 import mysql.connector
-import boto3
-from flask import Flask, render_template, request, redirect, session, url_for
+from mysql.connector import IntegrityError
+from flask import Flask, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
+
+
+def require_env(name):
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} environment variable is required")
+    return value
+
 
 app = Flask(__name__)
-app.secret_key = "your_secret_key"  # Replace with a secure key
+app.secret_key = require_env("FLASK_SECRET_KEY")
 
-# Retrieve MySQL password from AWS SSM
-ssm = boto3.client('ssm', region_name='us-east-1')
-parameter_name = "mysql_psw"
-response = ssm.get_parameter(Name=parameter_name, WithDecryption=True)
-mysql_password = response['Parameter']['Value']
+MYSQL_CONFIG = {
+    "host": os.environ.get("MYSQL_HOST", "mysql"),
+    "port": int(os.environ.get("MYSQL_PORT", "3306")),
+    "user": os.environ.get("MYSQL_USER", "appuser"),
+    "password": require_env("MYSQL_PASSWORD"),
+    "database": os.environ.get("MYSQL_DATABASE", "appdb"),
+}
 
-# Connect to MySQL
-db_connection = mysql.connector.connect(
-    host="database_endpoint",  # Replace with your DB endpoint
-    user="admin",
-    password=mysql_password,
-    database="test"
-)
-db_cursor = db_connection.cursor()
 
-# Create users table
-db_cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(255) NOT NULL,
-        password VARCHAR(255) NOT NULL
-    )
-""")
+def get_db_connection():
+    return mysql.connector.connect(**MYSQL_CONFIG)
 
-# Create user_data table
-db_cursor.execute("""
-    CREATE TABLE IF NOT EXISTS user_data (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        user_id INT NOT NULL,
-        full_name VARCHAR(255),
-        email VARCHAR(255),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-""")
 
-@app.route('/')
+def wait_for_db(max_attempts=30, delay_seconds=2):
+    last_error = None
+    for _ in range(max_attempts):
+        try:
+            connection = get_db_connection()
+            connection.close()
+            return
+        except mysql.connector.Error as exc:
+            last_error = exc
+            time.sleep(delay_seconds)
+
+    raise RuntimeError("Unable to connect to MySQL after waiting") from last_error
+
+
+@contextmanager
+def db_cursor():
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    try:
+        yield cursor
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def init_db():
+    wait_for_db()
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(255) NOT NULL UNIQUE,
+                password VARCHAR(255) NOT NULL
+            ) ENGINE=InnoDB
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                full_name VARCHAR(255),
+                email VARCHAR(255),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            ) ENGINE=InnoDB
+            """
+        )
+
+
+def password_is_valid(stored_password, submitted_password):
+    try:
+        return check_password_hash(stored_password, submitted_password)
+    except ValueError:
+        return stored_password == submitted_password
+
+
+@app.route("/")
 def health_check():
     return "App is running"
 
-@app.route('/signup', methods=['GET', 'POST'])
+
+@app.route("/signup", methods=["GET", "POST"])
 def signUp():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"]
 
-        db_cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, password))
-        db_connection.commit()
-        return redirect(url_for('signin'))
+        if not username or not password:
+            return render_template("signup.html"), 400
 
-    return render_template('signup.html')
+        password_hash = generate_password_hash(password)
+        try:
+            with db_cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO users (username, password) VALUES (%s, %s)",
+                    (username, password_hash),
+                )
+        except IntegrityError:
+            return "Username already exists", 409
 
-@app.route('/signin', methods=['GET', 'POST'])
+        return redirect(url_for("signin"))
+
+    return render_template("signup.html")
+
+
+@app.route("/signin", methods=["GET", "POST"])
 def signin():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"]
 
-        db_cursor.execute("SELECT * FROM users WHERE username = %s AND password = %s", (username, password))
-        user = db_cursor.fetchone()
+        with db_cursor() as cursor:
+            cursor.execute(
+                "SELECT id, password FROM users WHERE username = %s",
+                (username,),
+            )
+            user = cursor.fetchone()
 
-        if user:
-            session['user_id'] = user[0]
-            return redirect(url_for('dashboard'))
+            if user and password_is_valid(user[1], password):
+                session["user_id"] = user[0]
+                if user[1] == password:
+                    cursor.execute(
+                        "UPDATE users SET password = %s WHERE id = %s",
+                        (generate_password_hash(password), user[0]),
+                    )
+                return redirect(url_for("dashboard"))
 
-    return render_template('signin.html')
+    return render_template("signin.html")
 
-@app.route('/signout')
+
+@app.route("/signout")
 def signout():
-    session.pop('user_id', None)
-    return redirect(url_for('signin'))
+    session.pop("user_id", None)
+    return redirect(url_for("signin"))
 
-@app.route('/dashboard', methods=['GET'])
+
+@app.route("/dashboard", methods=["GET"])
 def dashboard():
-    if 'user_id' in session:
-        user_id = session['user_id']
+    if "user_id" not in session:
+        return redirect(url_for("signin"))
 
-        db_cursor.execute("SELECT username FROM users WHERE id = %s", (user_id,))
-        username = db_cursor.fetchone()[0]
+    user_id = session["user_id"]
+    with db_cursor() as cursor:
+        cursor.execute("SELECT username FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            session.pop("user_id", None)
+            return redirect(url_for("signin"))
 
-        db_cursor.execute("SELECT full_name, email FROM user_data WHERE user_id = %s", (user_id,))
-        profile = db_cursor.fetchone()
-        full_name = profile[0] if profile else ''
-        email = profile[1] if profile else ''
+        username = user[0]
 
-        db_cursor.execute("SELECT users.username, user_data.full_name, user_data.email FROM user_data JOIN users ON user_data.user_id = users.id")
-        all_profiles = db_cursor.fetchall()
+        cursor.execute(
+            "SELECT full_name, email FROM user_data WHERE user_id = %s",
+            (user_id,),
+        )
+        profile = cursor.fetchone()
+        full_name = profile[0] if profile else ""
+        email = profile[1] if profile else ""
 
-        return render_template('dashboard.html', username=username, full_name=full_name, email=email, all_profiles=all_profiles)
-    else:
-        return redirect(url_for('signin'))
+        cursor.execute(
+            """
+            SELECT users.username, user_data.full_name, user_data.email
+            FROM user_data
+            JOIN users ON user_data.user_id = users.id
+            """
+        )
+        all_profiles = cursor.fetchall()
 
-@app.route('/update', methods=['POST'])
+    return render_template(
+        "dashboard.html",
+        username=username,
+        full_name=full_name,
+        email=email,
+        all_profiles=all_profiles,
+    )
+
+
+@app.route("/update", methods=["POST"])
 def update_user_data():
-    if 'user_id' in session:
-        user_id = session['user_id']
-        full_name = request.form.get('full_name')
-        email = request.form.get('email')
+    if "user_id" not in session:
+        return redirect(url_for("signin"))
 
-        if full_name and email:
-            db_cursor.execute("SELECT * FROM user_data WHERE user_id = %s", (user_id,))
-            existing = db_cursor.fetchone()
+    user_id = session["user_id"]
+    full_name = request.form.get("full_name")
+    email = request.form.get("email")
+
+    if full_name and email:
+        with db_cursor() as cursor:
+            cursor.execute("SELECT id FROM user_data WHERE user_id = %s", (user_id,))
+            existing = cursor.fetchone()
 
             if existing:
-                db_cursor.execute("UPDATE user_data SET full_name = %s, email = %s WHERE user_id = %s",
-                                  (full_name, email, user_id))
+                cursor.execute(
+                    "UPDATE user_data SET full_name = %s, email = %s WHERE user_id = %s",
+                    (full_name, email, user_id),
+                )
             else:
-                db_cursor.execute("INSERT INTO user_data (user_id, full_name, email) VALUES (%s, %s, %s)",
-                                  (user_id, full_name, email))
+                cursor.execute(
+                    "INSERT INTO user_data (user_id, full_name, email) VALUES (%s, %s, %s)",
+                    (user_id, full_name, email),
+                )
 
-            db_connection.commit()
+    return redirect(url_for("dashboard"))
 
-        return redirect(url_for('dashboard'))
-    else:
-        return redirect(url_for('signin'))
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+init_db()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))

@@ -1,18 +1,15 @@
-# Use official Python base image
-FROM python:3.8-slim
+FROM python:3.11-slim
 
-# Set working directory inside container
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Copy requirements file and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all app files into container
 COPY . .
 
-# Expose Flask port
 EXPOSE 5000
 
-# Run the Flask app
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "2", "--timeout", "60", "app:app"]
