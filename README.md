@@ -90,13 +90,11 @@ Add these secrets under GitHub repo Settings > Secrets and variables > Actions:
 
 ## Creating the Base64 SSH Secret
 
-Create a deployment SSH key on your local machine:
+Create a deployment SSH key on local machine:
 
 ```powershell
 ssh-keygen -t ed25519 -C "github-actions-gcp" -f "$env:USERPROFILE\.ssh\app_python_mysql_gcp"
 ```
-
-Press Enter when asked for a passphrase so the key has no passphrase.
 
 Add the public key to the VM:
 
@@ -166,16 +164,6 @@ Actions > Deploy to GCP VM > Run workflow
 ```
 
 ## Checking the Deployment
-
-On the VM:
-
-```bash
-cd /opt/app_python_mysql
-docker compose ps
-docker compose logs web
-docker compose logs mysql
-curl -i http://localhost/
-```
 
 From a browser:
 
