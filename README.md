@@ -1,6 +1,6 @@
-# Flask MySQL App on GCP Free Tier
+# Flask MySQL App on GCP
 
-This repo is set up for a low-cost GCP deployment: one Compute Engine VM runs both the Flask app and MySQL with Docker Compose. The GitHub Actions workflow redeploys the app to the VM on pushes to `main`.
+This repo is set up for a GCP deployment: one Compute Engine VM runs both the Flask app and MySQL with Docker Compose. The GitHub Actions workflow redeploys the app to the VM on pushes to `main`.
 
 ## Cost target
 
