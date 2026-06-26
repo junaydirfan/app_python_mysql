@@ -17,17 +17,25 @@ jobs:
       - name: Configure SSH
         shell: bash
         env:
+          GCP_SSH_PRIVATE_KEY_B64: ${{ secrets.GCP_SSH_PRIVATE_KEY_B64 }}
           GCP_SSH_PRIVATE_KEY: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           python3 - <<'PY'
+          import base64
           import os
           from pathlib import Path
 
-          key = os.environ["GCP_SSH_PRIVATE_KEY"]
-          key = key.replace("\\r\\n", "\n").replace("\\n", "\n")
-          key = key.replace("\r\n", "\n").replace("\r", "\n").strip()
-          Path.home().joinpath(".ssh", "gcp_vm").write_text(key + "\n", encoding="utf-8", newline="\n")
+          key_b64 = os.environ.get("GCP_SSH_PRIVATE_KEY_B64", "").strip()
+          key_path = Path.home().joinpath(".ssh", "gcp_vm")
+
+          if key_b64:
+              key_path.write_bytes(base64.b64decode(key_b64))
+          else:
+              key = os.environ["GCP_SSH_PRIVATE_KEY"]
+              key = key.replace("\\r\\n", "\n").replace("\\n", "\n")
+              key = key.replace("\r\n", "\n").replace("\r", "\n").strip()
+              key_path.write_text(key + "\n", encoding="utf-8", newline="\n")
           PY
           chmod 600 ~/.ssh/gcp_vm
           ssh-keygen -y -f ~/.ssh/gcp_vm > /dev/null
